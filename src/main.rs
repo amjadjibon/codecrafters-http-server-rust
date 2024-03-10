@@ -47,20 +47,36 @@ fn handle_protocol_error(stream: &mut TcpStream) -> Result<()> {
     stream.write_all(response.as_bytes())
 }
 
+fn respond_echo(stream: &mut TcpStream, request: &Request) -> Result<()> {
+    let message = request.path.trim_start_matches("/echo/").trim();
+    let content_type = "text/plain";
+    let content_length = message.len();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
+        content_type, content_length, message
+    );
+    stream.write_all(response.as_bytes())
+}
+
 fn handle_client(mut stream: TcpStream) -> Result<()> {
     let mut buffer = [0; 1024];
     stream.read(&mut buffer)?;
 
-    let request = Request::from_buffer(&buffer).unwrap();
+    // let request = Request::from_buffer(&buffer).unwrap();
+    let request = match Request::from_buffer(&buffer) {
+        Some(request) => request,
+        None => return handle_protocol_error(&mut stream),
+    };
 
-    if request.protocol != "HTTP/1.1" {
-        return handle_protocol_error(&mut stream);
+    match request.protocol.as_str() {
+        "HTTP/1.1" => (),
+        _ => return handle_protocol_error(&mut stream),
     }
 
-    if request.method == "GET" && request.path == "/"{
-        return respond_with_status_ok(&mut stream);
-    } else {
-        return respond_with_not_found(&mut stream);
+    match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/") => respond_with_status_ok(&mut stream),
+        ("GET", path) if path.starts_with("/echo/") => respond_echo(&mut stream, &request),
+        _ => respond_with_not_found(&mut stream),
     }
 }
 
