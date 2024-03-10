@@ -5,6 +5,7 @@ use std::io::Result;
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::fs::{File, read};
 
 use flags::parse_flags;
 use request::Request;
@@ -53,8 +54,11 @@ async fn respond_user_agent(stream: &mut TcpStream, request: &Request) -> Result
     stream.write_all(response.as_bytes()).await
 }
 
-async fn respond_file(stream: &mut TcpStream, request: &Request, root_path: String) -> Result<()> {
-    // remove /files prefix
+async fn respond_read_file(
+    stream: &mut TcpStream,
+    request: &Request,
+    root_path: String,
+) -> Result<()> {
     let request_path = match request.path.strip_prefix("/files") {
         Some(path) => path,
         None => return respond_with_not_found(stream).await,
@@ -66,7 +70,7 @@ async fn respond_file(stream: &mut TcpStream, request: &Request, root_path: Stri
         return respond_with_not_found(stream).await;
     }
     
-    let file_content = match tokio::fs::read(&file_path).await {
+    let file_content = match read(&file_path).await {
         Ok(content) => content,
         Err(_) => return respond_with_not_found(stream).await,
     };
@@ -80,6 +84,30 @@ async fn respond_file(stream: &mut TcpStream, request: &Request, root_path: Stri
 
     stream.write_all(response.as_bytes()).await?;
     stream.write_all(&file_content).await
+}
+
+async fn respond_write_file(
+    stream: &mut TcpStream,
+    request: &Request,
+    root_path: String,
+) -> Result<()> {
+    let request_path = match request.path.strip_prefix("/files") {
+        Some(path) => path,
+        None => return respond_with_not_found(stream).await,
+    };
+
+    let file_path = format!("{}{}", root_path, request_path);
+    let file_content = request.body.as_bytes();
+
+    let mut file = match File::create(&file_path).await {
+        Ok(file) => file,
+        Err(_) => return respond_with_not_found(stream).await,
+    };
+
+    file.write_all(file_content).await?;
+
+    let response = "HTTP/1.1 201 OK\r\n\r\n";
+    stream.write_all(response.as_bytes()).await
 }
 
 async fn handle_client(mut stream: TcpStream, file_path: String) -> Result<()> {
@@ -108,7 +136,8 @@ async fn handle_client(mut stream: TcpStream, file_path: String) -> Result<()> {
         ("GET", "/") => respond_with_status_ok(&mut stream).await,
         ("GET", path) if path.starts_with("/echo/") => respond_echo(&mut stream, &request).await,
         ("GET", "/user-agent") => respond_user_agent(&mut stream, &request).await,
-        ("GET", path) if path.starts_with("/files/") => respond_file(&mut stream, &request, file_path).await,
+        ("GET", path) if path.starts_with("/files/") => respond_read_file(&mut stream, &request, file_path).await,
+        ("POST", path) if path.starts_with("/files/") => respond_write_file(&mut stream, &request, file_path).await,
         _ => respond_with_not_found(&mut stream).await,
     }
 }
