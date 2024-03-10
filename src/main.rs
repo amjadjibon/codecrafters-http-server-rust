@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::io::{Read, Result, Write};
-use std::net::{TcpListener, TcpStream };
+use std::io::Result;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
 struct Request {
     method: String,
@@ -65,22 +66,22 @@ impl Request {
     }
 }
 
-fn respond_with_status_ok(stream: &mut TcpStream) -> Result<()> {
+async fn respond_with_status_ok(stream: &mut TcpStream) -> Result<()> {
     let response = "HTTP/1.1 200 OK\r\n\r\n";
-    stream.write_all(response.as_bytes())
+    stream.write_all(response.as_bytes()).await
 }
 
-fn respond_with_not_found(stream: &mut TcpStream) -> Result<()> {
+async fn respond_with_not_found(stream: &mut TcpStream) -> Result<()> {
     let response = "HTTP/1.1 404 NOT FOUND\r\n\r\n";
-    stream.write_all(response.as_bytes())
+    stream.write_all(response.as_bytes()).await
 }
 
-fn handle_protocol_error(stream: &mut TcpStream) -> Result<()> {
+async fn handle_protocol_error(stream: &mut TcpStream) -> Result<()> {
     let response = "HTTP/1.1 505 HTTP VERSION NOT SUPPORTED\r\n\r\n";
-    stream.write_all(response.as_bytes())
+    stream.write_all(response.as_bytes()).await
 }
 
-fn respond_echo(stream: &mut TcpStream, request: &Request) -> Result<()> {
+async fn respond_echo(stream: &mut TcpStream, request: &Request) -> Result<()> {
     let message = request.path.trim_start_matches("/echo/").trim();
     let content_type = "text/plain";
     let content_length = message.len();
@@ -88,10 +89,10 @@ fn respond_echo(stream: &mut TcpStream, request: &Request) -> Result<()> {
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n{}",
         content_type, content_length, message
     );
-    stream.write_all(response.as_bytes())
+    stream.write_all(response.as_bytes()).await
 }
 
-fn respond_user_agent(stream: &mut TcpStream, request: &Request) -> Result<()> {
+async fn respond_user_agent(stream: &mut TcpStream, request: &Request) -> Result<()> {
     let user_agent = match request.headers.get("User-Agent") {
         Some(user_agent) => user_agent,
         None => "Unknown",
@@ -105,22 +106,22 @@ fn respond_user_agent(stream: &mut TcpStream, request: &Request) -> Result<()> {
         user_agent,
     );
 
-    stream.write_all(response.as_bytes())
+    stream.write_all(response.as_bytes()).await
 }
 
-fn handle_client(mut stream: TcpStream) -> Result<()> {
+async fn handle_client(mut stream: TcpStream) -> Result<()> {
     let mut buffer = [0; 1024];
-    stream.read(&mut buffer)?;
+    stream.read(&mut buffer).await?;
 
     // let request = Request::from_buffer(&buffer).unwrap();
     let request = match Request::from_buffer(&buffer) {
         Some(request) => request,
-        None => return handle_protocol_error(&mut stream),
+        None => return handle_protocol_error(&mut stream).await,
     };
 
     match request.protocol.as_str() {
         "HTTP/1.1" => (),
-        _ => return handle_protocol_error(&mut stream),
+        _ => return handle_protocol_error(&mut stream).await,
     }
 
     // log request to console
@@ -132,24 +133,25 @@ fn handle_client(mut stream: TcpStream) -> Result<()> {
     println!("Body\n{}", request.body);
 
     match (request.method.as_str(), request.path.as_str()) {
-        ("GET", "/") => respond_with_status_ok(&mut stream),
-        ("GET", path) if path.starts_with("/echo/") => respond_echo(&mut stream, &request),
-        ("GET", "/user-agent") => respond_user_agent(&mut stream, &request),
-        _ => respond_with_not_found(&mut stream),
+        ("GET", "/") => respond_with_status_ok(&mut stream).await,
+        ("GET", path) if path.starts_with("/echo/") => respond_echo(&mut stream, &request).await,
+        ("GET", "/user-agent") => respond_user_agent(&mut stream, &request).await,
+        _ => respond_with_not_found(&mut stream).await,
     }
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Logs from your program will appear here!");
 
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
-    
-    for stream in listener.incoming() {
-        match stream {
-            Ok(_stream) => {
+    let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
+    loop {
+        match listener.accept().await {
+            Ok((stream, _)) => {
                 println!("accepted new connection");
-
-                handle_client(_stream).unwrap();
+                tokio::spawn(async move {
+                    handle_client(stream).await.unwrap();
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
