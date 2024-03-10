@@ -1,70 +1,14 @@
-use std::collections::HashMap;
+mod flags;
+mod request;
+
 use std::io::Result;
+use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-struct Request {
-    method: String,
-    path: String,
-    protocol: String,
-    headers: HashMap<String, String>,
-    body: String,
-}
+use flags::parse_flags;
+use request::Request;
 
-impl Request {
-    fn new(method: String,
-        path: String,
-        protocol: String,
-        headers: HashMap<String, String>,
-        body: String,
-    ) -> Self {
-        Self {
-            method,
-            path,
-            protocol,
-            headers,
-            body,
-        }
-    }
-
-    fn from_buffer(buffer: &[u8]) -> Option<Self> {
-        let request = String::from_utf8_lossy(buffer);
-        let mut lines = request.lines();
-        let request_line = lines.next()?;
-        let mut parts = request_line.split_whitespace();
-        let method = parts.next()?;
-        let path = parts.next()?;
-        let protocol = parts.next()?;
-
-        // parse headers and body
-        let mut headers = HashMap::new();
-        for line in lines {
-            if line.is_empty() {
-                break;
-            }
-            let mut header_parts = line.splitn(2, ':');
-            let key = header_parts.next()?.trim();
-            let value = header_parts.next()?.trim();
-            headers.insert(key.to_string(), value.to_string());
-        }
-
-        let mut body = String::new();
-        if let Some(content_length) = headers.get("Content-Length") {
-            let content_length = content_length.parse::<usize>().ok()?;
-            let body_start = request.find("\r\n\r\n")? + 4;
-            let body_end = body_start + content_length;
-            body = request[body_start..body_end].to_string();
-        }
-
-        Some(Self::new(
-            method.to_string(),
-            path.to_string(),
-            protocol.to_string(),
-            headers,
-            body,
-        ))
-    }
-}
 
 async fn respond_with_status_ok(stream: &mut TcpStream) -> Result<()> {
     let response = "HTTP/1.1 200 OK\r\n\r\n";
@@ -109,11 +53,39 @@ async fn respond_user_agent(stream: &mut TcpStream, request: &Request) -> Result
     stream.write_all(response.as_bytes()).await
 }
 
-async fn handle_client(mut stream: TcpStream) -> Result<()> {
+async fn respond_file(stream: &mut TcpStream, request: &Request, root_path: String) -> Result<()> {
+    // remove /files prefix
+    let request_path = match request.path.strip_prefix("/files") {
+        Some(path) => path,
+        None => return respond_with_not_found(stream).await,
+        
+    };
+
+    let file_path = format!("{}{}", root_path, request_path);
+    if !Path::new(&file_path).exists() {
+        return respond_with_not_found(stream).await;
+    }
+    
+    let file_content = match tokio::fs::read(&file_path).await {
+        Ok(content) => content,
+        Err(_) => return respond_with_not_found(stream).await,
+    };
+
+    let content_type = "application/octet-stream";
+    let content_length = file_content.len();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n\r\n",
+        content_type, content_length
+    );
+
+    stream.write_all(response.as_bytes()).await?;
+    stream.write_all(&file_content).await
+}
+
+async fn handle_client(mut stream: TcpStream, file_path: String) -> Result<()> {
     let mut buffer = [0; 1024];
     stream.read(&mut buffer).await?;
 
-    // let request = Request::from_buffer(&buffer).unwrap();
     let request = match Request::from_buffer(&buffer) {
         Some(request) => request,
         None => return handle_protocol_error(&mut stream).await,
@@ -136,6 +108,7 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
         ("GET", "/") => respond_with_status_ok(&mut stream).await,
         ("GET", path) if path.starts_with("/echo/") => respond_echo(&mut stream, &request).await,
         ("GET", "/user-agent") => respond_user_agent(&mut stream, &request).await,
+        ("GET", path) if path.starts_with("/files/") => respond_file(&mut stream, &request, file_path).await,
         _ => respond_with_not_found(&mut stream).await,
     }
 }
@@ -144,13 +117,21 @@ async fn handle_client(mut stream: TcpStream) -> Result<()> {
 async fn main() {
     println!("Logs from your program will appear here!");
 
+    let args = std::env::args().collect::<Vec<String>>();
+    let flags = parse_flags(&args);
+    let directory = match flags.get("directory") {
+        Some(directory) => directory.to_string(),
+        None => "public".to_string(),
+    };
+
     let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
     loop {
         match listener.accept().await {
             Ok((stream, _)) => {
                 println!("accepted new connection");
+                let directory = directory.clone();
                 tokio::spawn(async move {
-                    handle_client(stream).await.unwrap();
+                    handle_client(stream, directory).await.unwrap();
                 });
             }
             Err(e) => {
